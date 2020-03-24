@@ -328,7 +328,7 @@ static void gs_usb_receive_bulk_callback(struct urb *urb)
 	netdev = dev->netdev;
 	stats = &netdev->stats;
 
-	if (!netif_device_present(netdev))
+	if (!netif_device_present(netdev) || !netif_running(netdev))
 		return;
 
 	if (hf->echo_id == -1) { /* normal rx */
