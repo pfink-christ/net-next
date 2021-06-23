@@ -125,6 +125,7 @@ struct gs_identify_mode {
 #define GS_CAN_FEATURE_HW_TIMESTAMP     BIT(4)
 #define GS_CAN_FEATURE_IDENTIFY         BIT(5)
 #define GS_CAN_FEATURE_FD               BIT(8)
+#define GS_CAN_FEATURE_REQ_USB_QUIRK    BIT(9)
 
 struct gs_device_bt_const {
 	__le32 feature;
@@ -154,6 +155,18 @@ struct gs_host_frame {
 	u8 reserved;
 
 	u8 data[64];
+
+	/* Workaround for "USB high-speed device in endpoint TX data corruption"
+	 * on NXP LPC546xx controllers (Errata sheet LPC546xx / USB.15)
+	 * This corruption occurs when the following conditions are met:
+	 * -> A TX (IN) transfer happens after a RX (OUT) transfer.
+	 * -> The RX (OUT) transfer length is 4 + N*16 (N>=0) bytes.
+	 * Size of this struct was 76 bytes, which does not even match the
+	 * second condition, but corruption seems to occur even on 4 + N*8.
+	 * Adding a dummy byte to break the second condition reliably
+	 * circumvents data curruption in this case.
+	 */
+	u8 errata_dummy;
 } __packed;
 /* The GS USB devices make use of the same flags and masks as in
  * linux/can.h and linux/can/error.h, and no additional mapping is necessary.
@@ -184,6 +197,8 @@ struct gs_can {
 
 	struct can_bittiming_const bt_const;
 	unsigned int channel;	/* channel number */
+
+	size_t gs_hf_xmit_size;
 
 	/* This lock prevents a race condition between xmit and receive. */
 	spinlock_t tx_ctx_lock;
@@ -593,7 +608,7 @@ static netdev_tx_t gs_can_start_xmit(struct sk_buff *skb,
 	usb_fill_bulk_urb(urb, dev->udev,
 			  usb_sndbulkpipe(dev->udev, GSUSB_ENDPOINT_OUT),
 			  hf,
-			  sizeof(*hf),
+			  dev->gs_hf_xmit_size,
 			  gs_usb_xmit_callback,
 			  txc);
 
@@ -965,6 +980,12 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 
 	if (feature & GS_CAN_FEATURE_FD)
 		dev->can.ctrlmode_supported |= CAN_CTRLMODE_FD;
+
+	dev->gs_hf_xmit_size = sizeof(struct gs_host_frame);
+
+	if (!(feature & GS_CAN_FEATURE_REQ_USB_QUIRK))
+		/* don't transfer the dummy byte if not requested */
+		dev->gs_hf_xmit_size -= sizeof(u8);
 
 	SET_NETDEV_DEV(netdev, &intf->dev);
 
