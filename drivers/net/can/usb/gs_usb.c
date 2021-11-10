@@ -1008,10 +1008,14 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 	if (feature & GS_CAN_FEATURE_ONE_SHOT)
 		dev->can.ctrlmode_supported |= CAN_CTRLMODE_ONE_SHOT;
 
+	dev->gs_hf_xmit_size = sizeof(struct gs_host_frame);
+
 	if (feature & GS_CAN_FEATURE_FD)
 		dev->can.ctrlmode_supported |= CAN_CTRLMODE_FD;
+	else
+		/* only transfer 8 data bytes instead of 64 */
+		dev->gs_hf_xmit_size -= 56 * sizeof(u8);
 
-	dev->gs_hf_xmit_size = sizeof(struct gs_host_frame);
 
 	if (!(feature & GS_CAN_FEATURE_REQ_USB_QUIRK))
 		/* don't transfer the dummy byte if not requested */
