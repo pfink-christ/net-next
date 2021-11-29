@@ -44,6 +44,7 @@ enum gs_usb_breq {
 	GS_USB_BREQ_TIMESTAMP,
 	GS_USB_BREQ_IDENTIFY,
 	GS_USB_BREQ_DATA_BITTIMING,
+	GS_USB_BREQ_BT_CONST_EXT,
 };
 
 enum gs_can_mode {
@@ -102,6 +103,7 @@ struct gs_device_config {
 #define GS_CAN_MODE_PAD_PKTS_TO_MAX_PKT_SIZE BIT(7)
 #define GS_CAN_MODE_FD BIT(8)
 /* GS_CAN_FEATURE_REQ_USB_QUIRK BIT(9) */
+/* GS_CAN_FEATURE_BT_CONST_EXT BIT(10) */
 
 struct gs_device_mode {
 	__le32 mode;
@@ -136,6 +138,7 @@ struct gs_identify_mode {
 #define GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE BIT(7)
 #define GS_CAN_FEATURE_FD BIT(8)
 #define GS_CAN_FEATURE_REQ_USB_QUIRK BIT(9)
+#define GS_CAN_FEATURE_BT_CONST_EXT BIT(10)
 
 union gs_device_bt_const {
 	struct gs_device_bt_const_base {
@@ -900,9 +903,6 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 	if (!bt_const)
 		return ERR_PTR(-ENOMEM);
 
-	if (interface_to_usbdev(intf)->descriptor.idVendor != USB_CES_CANEXT_FD_VENDOR_ID)
-		bt_const_size = sizeof(struct gs_device_bt_const_extended);
-
 	/* fetch bit timing constants */
 	rc = usb_control_msg(interface_to_usbdev(intf),
 			     usb_rcvctrlpipe(interface_to_usbdev(intf), 0),
@@ -944,17 +944,6 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 	dev->bt_const.brp_max = le32_to_cpu(bt_const->base.brp_max);
 	dev->bt_const.brp_inc = le32_to_cpu(bt_const->base.brp_inc);
 
-	if (interface_to_usbdev(intf)->descriptor.idVendor == USB_CES_CANEXT_FD_VENDOR_ID) {
-		dev->data_bt_const.tseg1_min = le32_to_cpu(bt_const->extended.dtseg1_min);
-		dev->data_bt_const.tseg1_max = le32_to_cpu(bt_const->extended.dtseg1_max);
-		dev->data_bt_const.tseg2_min = le32_to_cpu(bt_const->extended.dtseg2_min);
-		dev->data_bt_const.tseg2_max = le32_to_cpu(bt_const->extended.dtseg2_max);
-		dev->data_bt_const.sjw_max = le32_to_cpu(bt_const->extended.dsjw_max);
-		dev->data_bt_const.brp_min = le32_to_cpu(bt_const->extended.dbrp_min);
-		dev->data_bt_const.brp_max = le32_to_cpu(bt_const->extended.dbrp_max);
-		dev->data_bt_const.brp_inc = le32_to_cpu(bt_const->extended.dbrp_inc);
-	}
-
 	dev->udev = interface_to_usbdev(intf);
 	dev->iface = intf;
 	dev->netdev = netdev;
@@ -973,13 +962,7 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 	dev->can.clock.freq = le32_to_cpu(bt_const->base.fclk_can);
 	dev->can.bittiming_const = &dev->bt_const;
 	dev->can.do_set_bittiming = gs_usb_set_bittiming;
-
-	if (interface_to_usbdev(intf)->descriptor.idVendor == USB_CES_CANEXT_FD_VENDOR_ID)
-		dev->can.data_bittiming_const = &dev->data_bt_const;
-	else
-		/* If data_bt_const is not provided use bt_const here as well */
-		dev->can.data_bittiming_const = &dev->bt_const;
-
+	dev->can.data_bittiming_const = &dev->bt_const;
 	dev->can.do_set_data_bittiming = gs_usb_set_data_bittiming;
 
 	dev->can.ctrlmode_supported = CAN_CTRLMODE_CC_LEN8_DLC;
@@ -1014,6 +997,38 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 	if (le32_to_cpu(dconf->sw_version) > 1)
 		if (feature & GS_CAN_FEATURE_IDENTIFY)
 			netdev->ethtool_ops = &gs_usb_ethtool_ops;
+
+	/* fetch extended bit timing constants if device has feature
+	 * GS_CAN_FEATURE_BT_CONST_EXT
+	 */
+	if (feature & GS_CAN_FEATURE_BT_CONST_EXT) {
+		bt_const_size = sizeof(struct gs_device_bt_const_extended);
+
+		rc = usb_control_msg(interface_to_usbdev(intf),
+				     usb_rcvctrlpipe(interface_to_usbdev(intf), 0),
+				     GS_USB_BREQ_BT_CONST_EXT,
+				     USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_INTERFACE,
+				     channel, 0, bt_const, bt_const_size, 1000);
+
+		if (rc < 0) {
+			dev_err(&intf->dev,
+				"Couldn't get extended bit timing const for channel (err=%d)\n",
+				rc);
+			kfree(bt_const);
+			return ERR_PTR(rc);
+		}
+
+		dev->data_bt_const.tseg1_min = le32_to_cpu(bt_const->extended.dtseg1_min);
+		dev->data_bt_const.tseg1_max = le32_to_cpu(bt_const->extended.dtseg1_max);
+		dev->data_bt_const.tseg2_min = le32_to_cpu(bt_const->extended.dtseg2_min);
+		dev->data_bt_const.tseg2_max = le32_to_cpu(bt_const->extended.dtseg2_max);
+		dev->data_bt_const.sjw_max = le32_to_cpu(bt_const->extended.dsjw_max);
+		dev->data_bt_const.brp_min = le32_to_cpu(bt_const->extended.dbrp_min);
+		dev->data_bt_const.brp_max = le32_to_cpu(bt_const->extended.dbrp_max);
+		dev->data_bt_const.brp_inc = le32_to_cpu(bt_const->extended.dbrp_inc);
+
+		dev->can.data_bittiming_const = &dev->data_bt_const;
+	}
 
 	SET_NETDEV_DEV(netdev, &intf->dev);
 
