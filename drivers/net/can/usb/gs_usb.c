@@ -996,6 +996,20 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 			dev->gs_hf_size = struct_size(hf, classic_can, 1);
 	}
 
+	/* CANtact Pro from LinkLayer Labs does not set the
+	 * GS_CAN_FEATURE_REQ_USB_QUIRK bit, but is affected as well by the
+	 * NXP LPC usb transfer erratum. Set it unconditionally for firmware
+	 * versions <= 2 and issue a stability warning for this firmware, too.
+	 */
+	if (!strcmp(dev->udev->manufacturer, "LinkLayer Labs") &&
+	    !strcmp(dev->udev->product, "CANtact Pro") &&
+	    (le32_to_cpu(dconf->sw_version) <= 2)) {
+		dev->gs_hf_size = struct_size(hf, canfd_quirk, 1);
+		dev_warn(&intf->dev,
+			 "Your CANtact Pro firmware version (%u) is known to be unstable. Please update if possible.\n",
+			 le32_to_cpu(dconf->sw_version));
+	}
+
 	if (le32_to_cpu(dconf->sw_version) > 1)
 		if (feature & GS_CAN_FEATURE_IDENTIFY)
 			netdev->ethtool_ops = &gs_usb_ethtool_ops;
