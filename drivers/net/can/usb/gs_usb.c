@@ -143,6 +143,10 @@ struct gs_device_bt_const {
 
 #define GS_CAN_FLAG_OVERFLOW BIT(0)
 
+struct classic_can {
+	u8 data[8];
+} __packed;
+
 struct gs_host_frame {
 	u32 echo_id;
 	__le32 can_id;
@@ -152,7 +156,9 @@ struct gs_host_frame {
 	u8 flags;
 	u8 reserved;
 
-	u8 data[8];
+	union {
+		DECLARE_FLEX_ARRAY(struct classic_can, classic_can);
+	};
 } __packed;
 /* The GS USB devices make use of the same flags and masks as in
  * linux/can.h and linux/can/error.h, and no additional mapping is necessary.
@@ -183,6 +189,8 @@ struct gs_can {
 
 	struct can_bittiming_const bt_const;
 	unsigned int channel;	/* channel number */
+
+	size_t gs_hf_size;
 
 	/* This lock prevents a race condition between xmit and receive. */
 	spinlock_t tx_ctx_lock;
@@ -340,7 +348,7 @@ static void gs_usb_receive_bulk_callback(struct urb *urb)
 		cf->can_id = le32_to_cpu(hf->can_id);
 
 		can_frame_set_cc_len(cf, hf->can_dlc, dev->can.ctrlmode);
-		memcpy(cf->data, hf->data, 8);
+		memcpy(cf->data, hf->classic_can->data, 8);
 
 		/* ERROR frames tell us information about the controller */
 		if (le32_to_cpu(hf->can_id) & CAN_ERR_FLAG)
@@ -396,8 +404,7 @@ static void gs_usb_receive_bulk_callback(struct urb *urb)
  resubmit_urb:
 	usb_fill_bulk_urb(urb, usbcan->udev,
 			  usb_rcvbulkpipe(usbcan->udev, GSUSB_ENDPOINT_IN),
-			  hf, sizeof(struct gs_host_frame),
-			  gs_usb_receive_bulk_callback, usbcan);
+			  hf, dev->gs_hf_size, gs_usb_receive_bulk_callback, usbcan);
 
 	rc = usb_submit_urb(urb, GFP_ATOMIC);
 
@@ -483,7 +490,7 @@ static netdev_tx_t gs_can_start_xmit(struct sk_buff *skb,
 	if (!urb)
 		goto nomem_urb;
 
-	hf = usb_alloc_coherent(dev->udev, sizeof(*hf), GFP_ATOMIC,
+	hf = usb_alloc_coherent(dev->udev, dev->gs_hf_size, GFP_ATOMIC,
 				&urb->transfer_dma);
 	if (!hf) {
 		netdev_err(netdev, "No memory left for USB buffer\n");
@@ -505,12 +512,11 @@ static netdev_tx_t gs_can_start_xmit(struct sk_buff *skb,
 	hf->can_id = cpu_to_le32(cf->can_id);
 	hf->can_dlc = can_get_cc_dlc(cf, dev->can.ctrlmode);
 
-	memcpy(hf->data, cf->data, cf->len);
+	memcpy(hf->classic_can->data, cf->data, cf->len);
 
 	usb_fill_bulk_urb(urb, dev->udev,
 			  usb_sndbulkpipe(dev->udev, GSUSB_ENDPOINT_OUT),
-			  hf, sizeof(*hf),
-			  gs_usb_xmit_callback, txc);
+			  hf, dev->gs_hf_size, gs_usb_xmit_callback, txc);
 
 	urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 	usb_anchor_urb(urb, &dev->tx_submitted);
@@ -527,8 +533,8 @@ static netdev_tx_t gs_can_start_xmit(struct sk_buff *skb,
 		gs_free_tx_context(txc);
 
 		usb_unanchor_urb(urb);
-		usb_free_coherent(dev->udev,
-				  sizeof(*hf), hf, urb->transfer_dma);
+		usb_free_coherent(dev->udev, dev->gs_hf_size, hf,
+				  urb->transfer_dma);
 
 		if (rc == -ENODEV) {
 			netif_device_detach(netdev);
@@ -548,7 +554,7 @@ static netdev_tx_t gs_can_start_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 
  badidx:
-	usb_free_coherent(dev->udev, sizeof(*hf), hf, urb->transfer_dma);
+	usb_free_coherent(dev->udev, dev->gs_hf_size, hf, urb->transfer_dma);
  nomem_hf:
 	usb_free_urb(urb);
 
@@ -583,8 +589,7 @@ static int gs_can_open(struct net_device *netdev)
 				return -ENOMEM;
 
 			/* alloc rx buffer */
-			buf = usb_alloc_coherent(dev->udev,
-						 sizeof(struct gs_host_frame),
+			buf = usb_alloc_coherent(dev->udev, dev->gs_hf_size,
 						 GFP_KERNEL,
 						 &urb->transfer_dma);
 			if (!buf) {
@@ -599,8 +604,7 @@ static int gs_can_open(struct net_device *netdev)
 					  dev->udev,
 					  usb_rcvbulkpipe(dev->udev,
 							  GSUSB_ENDPOINT_IN),
-					  buf,
-					  sizeof(struct gs_host_frame),
+					  buf, dev->gs_hf_size,
 					  gs_usb_receive_bulk_callback, parent);
 			urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 
@@ -771,6 +775,7 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 	struct net_device *netdev;
 	int rc;
 	struct gs_device_bt_const *bt_const;
+	struct gs_host_frame *hf;
 	u32 feature;
 
 	bt_const = kmalloc(sizeof(*bt_const), GFP_KERNEL);
@@ -850,6 +855,8 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 
 	if (feature & GS_CAN_FEATURE_ONE_SHOT)
 		dev->can.ctrlmode_supported |= CAN_CTRLMODE_ONE_SHOT;
+
+	dev->gs_hf_size = struct_size(hf, classic_can, 1);
 
 	if (le32_to_cpu(dconf->sw_version) > 1)
 		if (feature & GS_CAN_FEATURE_IDENTIFY)
