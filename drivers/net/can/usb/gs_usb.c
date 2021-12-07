@@ -98,6 +98,7 @@ struct gs_device_config {
 /* GS_CAN_FEATURE_USER_ID BIT(6) */
 #define GS_CAN_MODE_PAD_PKTS_TO_MAX_PKT_SIZE BIT(7)
 #define GS_CAN_MODE_FD BIT(8)
+/* GS_CAN_FEATURE_REQ_USB_QUIRK BIT(9) */
 
 struct gs_device_mode {
 	__le32 mode;
@@ -131,6 +132,7 @@ struct gs_identify_mode {
 #define GS_CAN_FEATURE_USER_ID BIT(6)
 #define GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE BIT(7)
 #define GS_CAN_FEATURE_FD BIT(8)
+#define GS_CAN_FEATURE_REQ_USB_QUIRK BIT(9)
 
 struct gs_device_bt_const {
 	__le32 feature;
@@ -163,6 +165,10 @@ struct canfd {
 	u8 data[64];
 } __packed;
 
+struct canfd_quirk {
+	u8 data[65];
+} __packed;
+
 struct gs_host_frame {
 	u32 echo_id;
 	__le32 can_id;
@@ -176,6 +182,7 @@ struct gs_host_frame {
 		DECLARE_FLEX_ARRAY(struct classic_can, classic_can);
 		DECLARE_FLEX_ARRAY(struct classic_can_ts, classic_can_ts);
 		DECLARE_FLEX_ARRAY(struct canfd, canfd);
+		DECLARE_FLEX_ARRAY(struct canfd_quirk, canfd_quirk);
 	};
 } __packed;
 /* The GS USB devices make use of the same flags and masks as in
@@ -942,7 +949,11 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 
 	if (feature & GS_CAN_FEATURE_FD) {
 		dev->can.ctrlmode_supported |= CAN_CTRLMODE_FD;
-		dev->gs_hf_size = struct_size(hf, canfd, 1);
+
+		if (feature & GS_CAN_FEATURE_REQ_USB_QUIRK)
+			dev->gs_hf_size = struct_size(hf, canfd_quirk, 1);
+		else
+			dev->gs_hf_size = struct_size(hf, canfd, 1);
 	} else {
 		if (feature & GS_CAN_FEATURE_HW_TIMESTAMP)
 			dev->gs_hf_size = struct_size(hf, classic_can_ts, 1);
